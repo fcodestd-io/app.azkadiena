@@ -7,6 +7,8 @@ import {
   useEffect,
   useMemo,
   useRef,
+  use,
+  Suspense,
 } from "react";
 import { useReactToPrint } from "react-to-print";
 import Barcode from "react-barcode";
@@ -15,6 +17,7 @@ import {
   updateProductAction,
   deleteProductAction,
   getStockMovementsByVariant,
+  syncProductsAction,
   ActionState,
 } from "./action";
 import { ConfirmDialog } from "@/components/confirm-dialog";
@@ -34,6 +37,7 @@ import {
   Tag,
   CheckSquare,
   Square,
+  RefreshCw,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -58,6 +62,26 @@ interface PageClientProps {
   hasMoreInitial: boolean;
   availableSizes: { id: string; name: string }[];
   availableColors: { id: string; name: string }[];
+}
+
+// Komponen kecil yang "use()"-nya promise data sync terbaru. Selama promise
+// belum resolve, React akan suspend komponen ini dan menampilkan fallback
+// dari <Suspense> di sekitarnya (dipakai untuk tombol "Sync Data").
+function SyncResolver({
+  resource,
+  onResolved,
+}: {
+  resource: Promise<ProductItem[]>;
+  onResolved: (data: ProductItem[]) => void;
+}) {
+  const data = use(resource);
+
+  useEffect(() => {
+    onResolved(data);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data]);
+
+  return null;
 }
 
 export function ProductPageClient({
@@ -91,6 +115,12 @@ export function ProductPageClient({
   const [hasMoreMovements, setHasMoreMovements] = useState(true);
 
   const [deleteTarget, setDeleteTarget] = useState<ProductItem | null>(null);
+
+  // State untuk tombol "Sync Data" (Suspense-driven refetch)
+  const [syncResource, setSyncResource] = useState<Promise<
+    ProductItem[]
+  > | null>(null);
+  const [isSyncing, setIsSyncing] = useState(false);
 
   // Ref Khusus react-to-print
   const printRef = useRef<HTMLDivElement>(null);
@@ -134,20 +164,29 @@ export function ProductPageClient({
     }
   }, [updateState]);
 
+  // Live search multi-kata: "<nama produk> <nama size> <nama warna>" (urutan
+  // bebas). Query dipecah per-kata (AND antar kata), dan tiap kata dicocokkan
+  // ke nama produk ATAU salah satu varian (size / color / sku / barcode).
   const filteredProducts = useMemo(() => {
-    if (!searchQuery.trim()) return productsList;
-    const query = searchQuery.toLowerCase();
+    const query = searchQuery.trim().toLowerCase();
+    if (!query) return productsList;
+
+    const terms = query.split(/\s+/).filter(Boolean);
 
     return productsList.filter((p) => {
-      const matchName = p.name.toLowerCase().includes(query);
-      const matchVariant = p.variants.some(
-        (v) =>
-          v.sku.toLowerCase().includes(query) ||
-          v.barcode.includes(query) ||
-          v.size.name.toLowerCase().includes(query) ||
-          v.color.name.toLowerCase().includes(query),
-      );
-      return matchName || matchVariant;
+      const productNameLower = p.name.toLowerCase();
+
+      return terms.every((term) => {
+        const matchName = productNameLower.includes(term);
+        const matchVariant = p.variants.some(
+          (v) =>
+            v.sku.toLowerCase().includes(term) ||
+            v.barcode.includes(term) ||
+            v.size.name.toLowerCase().includes(term) ||
+            v.color.name.toLowerCase().includes(term),
+        );
+        return matchName || matchVariant;
+      });
     });
   }, [productsList, searchQuery]);
 
@@ -230,6 +269,15 @@ export function ProductPageClient({
     });
   };
 
+  // Tombol "Sync Data": membuat promise baru dari server action. Promise ini
+  // di-"use()" oleh <SyncResolver> di dalam <Suspense>, sehingga UI otomatis
+  // menampilkan fallback loading selama data terbaru masih diambil dari server.
+  const handleSync = () => {
+    if (isSyncing) return;
+    setIsSyncing(true);
+    setSyncResource(syncProductsAction());
+  };
+
   return (
     <div className="space-y-6">
       {/* CSS KHUSUS PENCETAKAN BARCODE RESI (INLINE STYLES FOR PRINT) */}
@@ -303,16 +351,47 @@ export function ProductPageClient({
         </button>
       </div>
 
-      {/* Control Bar: Live Search */}
-      <div className="relative w-full sm:w-80">
-        <Search className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 h-3.5 w-3.5 text-zinc-500" />
-        <input
-          type="text"
-          placeholder="Cari produk / SKU / Barcode / Size / Warna..."
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-          className="w-full rounded-xl border border-zinc-800 bg-zinc-900/90 pl-9 pr-3 py-2 text-xs text-zinc-100 placeholder-zinc-500 outline-none focus:border-zinc-700 transition-all"
-        />
+      {/* Control Bar: Live Search + Sync Data */}
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="relative w-full sm:w-96">
+          <Search className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 h-3.5 w-3.5 text-zinc-500" />
+          <input
+            type="text"
+            placeholder="Cari: nama produk, size, warna, SKU, atau barcode..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="w-full rounded-xl border border-zinc-800 bg-zinc-900/90 pl-9 pr-3 py-2 text-xs text-zinc-100 placeholder-zinc-500 outline-none focus:border-zinc-700 transition-all"
+          />
+        </div>
+
+        <button
+          onClick={handleSync}
+          disabled={isSyncing}
+          className="flex items-center justify-center space-x-1.5 rounded-xl border border-zinc-800 bg-zinc-900 px-4 py-2 text-xs font-medium text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100 transition-colors cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
+          title="Ambil ulang data produk terbaru dari server"
+        >
+          {syncResource ? (
+            <Suspense
+              fallback={
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-zinc-400" />
+              }
+            >
+              <SyncResolver
+                resource={syncResource}
+                onResolved={(data) => {
+                  setProductsList(data);
+                  setSyncResource(null);
+                  setIsSyncing(false);
+                  toast.success("Data produk berhasil disinkronkan!");
+                }}
+              />
+              <RefreshCw className="h-3.5 w-3.5 text-zinc-400" />
+            </Suspense>
+          ) : (
+            <RefreshCw className="h-3.5 w-3.5 text-zinc-400" />
+          )}
+          <span>{isSyncing ? "Menyinkronkan..." : "Sync Data"}</span>
+        </button>
       </div>
 
       {/* Accordion Table List */}

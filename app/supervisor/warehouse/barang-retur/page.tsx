@@ -1,6 +1,12 @@
 "use client";
 
-import React, { useState, useEffect, useMemo, useRef, useTransition } from "react";
+import React, {
+  useState,
+  useEffect,
+  useMemo,
+  useRef,
+  useTransition,
+} from "react";
 import { toast } from "sonner";
 import { BrowserMultiFormatReader } from "@zxing/browser";
 import {
@@ -25,6 +31,7 @@ import {
   AlertTriangle,
   QrCode,
   Camera,
+  ScanLine,
 } from "lucide-react";
 
 type TempItem = {
@@ -50,9 +57,13 @@ export default function BarangReturPage() {
   const [tempItems, setTempItems] = useState<TempItem[]>([]);
 
   // Webcam Scanner State (Inline)
+  // isScanning berarti "kamera aktif/preview terbuka", BUKAN sedang
+  // auto-decode terus-menerus. Decode barcode hanya terjadi saat tombol
+  // "Tangkap & Scan" ditekan (lihat handleCaptureAndScan).
   const [showScanner, setShowScanner] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const codeReaderRef = useRef<BrowserMultiFormatReader | null>(null);
   const lastScannedTimeRef = useRef<number>(0);
 
@@ -60,7 +71,9 @@ export default function BarangReturPage() {
   const [showPicker, setShowPicker] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
 
-  const [expandedReceipts, setExpandedReceipts] = useState<Record<string, boolean>>({});
+  const [expandedReceipts, setExpandedReceipts] = useState<
+    Record<string, boolean>
+  >({});
   const [isPending, startTransition] = useTransition();
 
   const loadData = async () => {
@@ -89,7 +102,7 @@ export default function BarangReturPage() {
     if (!searchQuery.trim()) return variantOptions;
     const keywords = searchQuery.toLowerCase().trim().split(/\s+/);
     return variantOptions.filter((item) =>
-      keywords.every((kw) => item.searchKey.includes(kw))
+      keywords.every((kw) => item.searchKey.includes(kw)),
     );
   }, [variantOptions, searchQuery]);
 
@@ -105,7 +118,9 @@ export default function BarangReturPage() {
         return prev;
       }
 
-      toast.success(`${variant.productName} (${variant.colorName} - ${variant.sizeName}) ditambahkan.`);
+      toast.success(
+        `${variant.productName} (${variant.colorName} - ${variant.sizeName}) ditambahkan.`,
+      );
       return [
         ...prev,
         {
@@ -126,15 +141,15 @@ export default function BarangReturPage() {
   const handleQtyChange = (
     variantId: string,
     field: "qtyBagus" | "qtyCacat",
-    val: string
+    val: string,
   ) => {
     const qty = parseInt(val, 10) || 0;
     setTempItems((prev) =>
       prev.map((item) =>
         item.variantId === variantId
           ? { ...item, [field]: qty < 0 ? 0 : qty }
-          : item
-      )
+          : item,
+      ),
     );
   };
 
@@ -143,14 +158,10 @@ export default function BarangReturPage() {
   };
 
   // ------------------------------------------------------------------
-  // WEBCAM SCANNER SAFE CLEANUP & STREAM LOGIC
+  // WEBCAM SCANNER: BUKA PREVIEW KAMERA SAJA (TIDAK AUTO-DECODE)
   // ------------------------------------------------------------------
   const stopScanner = () => {
     try {
-      if (codeReaderRef.current) {
-        codeReaderRef.current = null;
-      }
-
       if (videoRef.current && videoRef.current.srcObject) {
         const stream = videoRef.current.srcObject as MediaStream;
         const tracks = stream.getTracks();
@@ -164,72 +175,90 @@ export default function BarangReturPage() {
     }
   };
 
+  // Hanya membuka stream kamera untuk preview. Tidak ada loop decode di sini
+  // sama sekali — barcode baru dibaca saat user menekan tombol scan.
   const startScanner = async () => {
     stopScanner();
-    setIsScanning(true);
 
     try {
-      const codeReader = new BrowserMultiFormatReader();
-      codeReaderRef.current = codeReader;
+      if (!codeReaderRef.current) {
+        codeReaderRef.current = new BrowserMultiFormatReader();
+      }
 
-      const constraints: MediaStreamConstraints = {
-        video: { facingMode: { exact: "environment" } },
-      };
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { exact: "environment" } },
+          audio: false,
+        });
+      } catch {
+        // Fallback ke kamera belakang "ideal" jika exact: environment gagal
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "environment" },
+          audio: false,
+        });
+      }
 
       if (videoRef.current) {
-        try {
-          await codeReader.decodeFromConstraints(
-            constraints,
-            videoRef.current,
-            (result) => {
-              if (result) {
-                const now = Date.now();
-                if (now - lastScannedTimeRef.current < 1500) return;
-                lastScannedTimeRef.current = now;
-
-                const scannedBarcode = result.getText();
-                const matchedVariant = variantOptions.find(
-                  (v) => v.barcode === scannedBarcode || v.sku === scannedBarcode
-                );
-
-                if (matchedVariant) {
-                  addVariantToTempList(matchedVariant);
-                } else {
-                  toast.error(`Barcode/SKU "${scannedBarcode}" tidak ditemukan.`);
-                }
-              }
-            }
-          );
-        } catch {
-          // Fallback ke Kamera Belakang Ideal jika exact: environment gagal
-          await codeReader.decodeFromConstraints(
-            { video: { facingMode: "environment" } },
-            videoRef.current,
-            (result) => {
-              if (result) {
-                const now = Date.now();
-                if (now - lastScannedTimeRef.current < 1500) return;
-                lastScannedTimeRef.current = now;
-
-                const scannedBarcode = result.getText();
-                const matchedVariant = variantOptions.find(
-                  (v) => v.barcode === scannedBarcode || v.sku === scannedBarcode
-                );
-
-                if (matchedVariant) {
-                  addVariantToTempList(matchedVariant);
-                } else {
-                  toast.error(`Barcode/SKU "${scannedBarcode}" tidak ditemukan.`);
-                }
-              }
-            }
-          );
-        }
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
       }
+
+      setIsScanning(true);
     } catch (err) {
       console.error("Gagal memulai kamera:", err);
       toast.error("Gagal membuka kamera. Pastikan izin kamera aktif.");
       setIsScanning(false);
+    }
+  };
+
+  // Dipanggil HANYA saat tombol "Tangkap & Scan" ditekan. Mengambil satu
+  // frame dari video yang sedang preview, lalu mencoba decode barcode dari
+  // frame tersebut satu kali (bukan terus-menerus).
+  const handleCaptureAndScan = () => {
+    if (!videoRef.current || !canvasRef.current || !codeReaderRef.current) {
+      return;
+    }
+
+    const now = Date.now();
+    if (now - lastScannedTimeRef.current < 700) {
+      return;
+    }
+    lastScannedTimeRef.current = now;
+
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    const width = video.videoWidth;
+    const height = video.videoHeight;
+
+    if (!width || !height) {
+      toast.warning("Kamera belum siap, coba lagi sebentar.");
+      return;
+    }
+
+    canvas.width = width;
+    canvas.height = height;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.drawImage(video, 0, 0, width, height);
+
+    try {
+      const result = codeReaderRef.current.decodeFromCanvas(canvas);
+      const scannedBarcode = result.getText();
+      const matchedVariant = variantOptions.find(
+        (v) => v.barcode === scannedBarcode || v.sku === scannedBarcode,
+      );
+
+      if (matchedVariant) {
+        addVariantToTempList(matchedVariant);
+      } else {
+        toast.error(`Barcode/SKU "${scannedBarcode}" tidak ditemukan.`);
+      }
+    } catch (err) {
+      toast.warning(
+        "Barcode tidak terdeteksi. Posisikan barcode di tengah bingkai lalu tekan tombol Scan lagi.",
+      );
     }
   };
 
@@ -260,10 +289,12 @@ export default function BarangReturPage() {
     }
 
     const hasInvalidItem = tempItems.every(
-      (item) => item.qtyBagus === 0 && item.qtyCacat === 0
+      (item) => item.qtyBagus === 0 && item.qtyCacat === 0,
     );
     if (hasInvalidItem) {
-      toast.warning("Isi kuantitas retur bagus atau retur cacat minimal 1 pcs.");
+      toast.warning(
+        "Isi kuantitas retur bagus atau retur cacat minimal 1 pcs.",
+      );
       return;
     }
 
@@ -298,7 +329,9 @@ export default function BarangReturPage() {
           <RotateCcw className="h-5 w-5 text-rose-400" />
           Barang Retur
         </h1>
-        <p className="text-[11px] text-zinc-400">Penerimaan retur produk dari marketplace</p>
+        <p className="text-[11px] text-zinc-400">
+          Penerimaan retur produk dari marketplace
+        </p>
       </div>
 
       {/* ==================================================================== */}
@@ -358,7 +391,8 @@ export default function BarangReturPage() {
           <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3 space-y-3 animate-in fade-in duration-150">
             <div className="flex items-center justify-between">
               <span className="text-[11px] font-bold text-zinc-300 flex items-center gap-1.5">
-                <Camera className="h-3.5 w-3.5 text-rose-400" /> Pemindai Barcode Kamera
+                <Camera className="h-3.5 w-3.5 text-rose-400" /> Pemindai
+                Barcode Kamera
               </span>
               <button
                 type="button"
@@ -372,17 +406,28 @@ export default function BarangReturPage() {
             {/* Viewfinder Persegi Panjang */}
             <div className="relative overflow-hidden rounded-xl border-2 border-zinc-800 bg-zinc-900 h-44 flex items-center justify-center">
               <video ref={videoRef} className="h-full w-full object-cover" />
+              {/* Canvas tersembunyi, dipakai hanya untuk menangkap 1 frame saat tombol Scan ditekan */}
+              <canvas ref={canvasRef} className="hidden" />
 
               <div className="absolute inset-0 pointer-events-none flex items-center justify-center p-4">
-                <div className="w-full h-20 border-2 border-rose-400/80 rounded-lg relative bg-rose-500/5 shadow-[0_0_15px_rgba(251,113,133,0.2)]">
-                  {isScanning && (
-                    <div className="absolute inset-x-0 h-0.5 bg-rose-400 animate-pulse top-1/2 -translate-y-1/2 shadow-[0_0_8px_#fb7185]" />
-                  )}
-                </div>
+                <div className="w-full h-20 border-2 border-rose-400/80 rounded-lg bg-rose-500/5 shadow-[0_0_15px_rgba(251,113,133,0.2)]" />
               </div>
+
+              {!isScanning && (
+                <div className="absolute inset-0 flex items-center justify-center bg-zinc-950/60">
+                  <span className="text-[11px] text-zinc-400">
+                    Kamera belum aktif
+                  </span>
+                </div>
+              )}
             </div>
 
-            <div>
+            <p className="text-[10px] text-zinc-500 text-center">
+              Posisikan barcode di dalam bingkai, lalu tekan tombol "Tangkap &
+              Scan" untuk membaca.
+            </p>
+
+            <div className="space-y-2">
               {!isScanning ? (
                 <button
                   type="button"
@@ -390,17 +435,27 @@ export default function BarangReturPage() {
                   className="w-full flex items-center justify-center gap-2 rounded-xl bg-rose-500 py-2 text-xs font-bold text-zinc-950 active:scale-95 cursor-pointer shadow-md shadow-rose-500/20"
                 >
                   <Camera className="h-3.5 w-3.5" />
-                  <span>Mulai Pemindaian Kamera</span>
+                  <span>Buka Kamera</span>
                 </button>
               ) : (
-                <button
-                  type="button"
-                  onClick={stopScanner}
-                  className="w-full flex items-center justify-center gap-2 rounded-xl border border-red-500/30 bg-red-500/10 py-2 text-xs font-bold text-red-400 hover:bg-red-500/20 active:scale-95 cursor-pointer"
-                >
-                  <X className="h-3.5 w-3.5" />
-                  <span>Hentikan Pemindaian</span>
-                </button>
+                <>
+                  <button
+                    type="button"
+                    onClick={handleCaptureAndScan}
+                    className="w-full flex items-center justify-center gap-2 rounded-xl bg-rose-500 py-2.5 text-xs font-bold text-zinc-950 active:scale-95 cursor-pointer shadow-md shadow-rose-500/20"
+                  >
+                    <ScanLine className="h-4 w-4" />
+                    <span>Tangkap &amp; Scan Barcode</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={stopScanner}
+                    className="w-full flex items-center justify-center gap-2 rounded-xl border border-red-500/30 bg-red-500/10 py-2 text-xs font-bold text-red-400 hover:bg-red-500/20 active:scale-95 cursor-pointer"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                    <span>Hentikan Pemindaian</span>
+                  </button>
+                </>
               )}
             </div>
           </div>
@@ -415,7 +470,8 @@ export default function BarangReturPage() {
           <div className="space-y-2.5 max-h-72 overflow-y-auto pr-1">
             {tempItems.length === 0 ? (
               <div className="rounded-xl border border-dashed border-zinc-800 p-4 text-center text-xs text-zinc-500">
-                Belum ada item retur ditambahkan. Gunakan Search atau Scan Barcode di atas.
+                Belum ada item retur ditambahkan. Gunakan Search atau Scan
+                Barcode di atas.
               </div>
             ) : (
               tempItems.map((item) => {
@@ -428,7 +484,9 @@ export default function BarangReturPage() {
                   >
                     <div className="flex items-center justify-between">
                       <div>
-                        <p className="font-bold text-zinc-200">{item.productName}</p>
+                        <p className="font-bold text-zinc-200">
+                          {item.productName}
+                        </p>
                         <p className="text-[10px] text-zinc-400">
                           {item.colorName} - {item.sizeName}
                         </p>
@@ -452,7 +510,11 @@ export default function BarangReturPage() {
                           type="number"
                           value={item.qtyBagus}
                           onChange={(e) =>
-                            handleQtyChange(item.variantId, "qtyBagus", e.target.value)
+                            handleQtyChange(
+                              item.variantId,
+                              "qtyBagus",
+                              e.target.value,
+                            )
                           }
                           className="w-full rounded-md border border-emerald-500/40 bg-zinc-900 px-2 py-1 text-center font-bold text-emerald-400 focus:outline-none"
                         />
@@ -469,7 +531,11 @@ export default function BarangReturPage() {
                           type="number"
                           value={item.qtyCacat}
                           onChange={(e) =>
-                            handleQtyChange(item.variantId, "qtyCacat", e.target.value)
+                            handleQtyChange(
+                              item.variantId,
+                              "qtyCacat",
+                              e.target.value,
+                            )
                           }
                           className="w-full rounded-md border border-rose-500/40 bg-zinc-900 px-2 py-1 text-center font-bold text-rose-400 focus:outline-none"
                         />
@@ -523,8 +589,14 @@ export default function BarangReturPage() {
             {returnList.map((receipt) => {
               const isExpanded = !!expandedReceipts[receipt.id];
 
-              const totalBagus = receipt.items.reduce((acc: number, i: any) => acc + i.qtyBagus, 0);
-              const totalCacat = receipt.items.reduce((acc: number, i: any) => acc + i.qtyCacat, 0);
+              const totalBagus = receipt.items.reduce(
+                (acc: number, i: any) => acc + i.qtyBagus,
+                0,
+              );
+              const totalCacat = receipt.items.reduce(
+                (acc: number, i: any) => acc + i.qtyCacat,
+                0,
+              );
 
               return (
                 <div
@@ -538,19 +610,24 @@ export default function BarangReturPage() {
                           {receipt.returnCode}
                         </span>
                         <p className="text-[10px] text-zinc-400 flex items-center gap-1 mt-0.5">
-                          <ShoppingBag className="h-3 w-3 text-zinc-500" /> {receipt.marketplace?.name}
+                          <ShoppingBag className="h-3 w-3 text-zinc-500" />{" "}
+                          {receipt.marketplace?.name}
                         </p>
                       </div>
 
                       <div className="text-right flex items-center gap-2">
                         <div>
-                          <span className="text-[9px] text-zinc-500 uppercase block">Bagus</span>
+                          <span className="text-[9px] text-zinc-500 uppercase block">
+                            Bagus
+                          </span>
                           <span className="text-xs font-extrabold text-emerald-400">
                             +{totalBagus} pcs
                           </span>
                         </div>
                         <div>
-                          <span className="text-[9px] text-zinc-500 uppercase block">Cacat</span>
+                          <span className="text-[9px] text-zinc-500 uppercase block">
+                            Cacat
+                          </span>
                           <span className="text-xs font-extrabold text-rose-400">
                             {totalCacat} pcs
                           </span>
@@ -563,7 +640,10 @@ export default function BarangReturPage() {
                         <User className="h-3 w-3" /> Op: {receipt.operatorName}
                       </span>
                       <span className="flex items-center gap-1">
-                        <Calendar className="h-3 w-3" /> {new Date(receipt.createdAt).toLocaleDateString("id-ID")}
+                        <Calendar className="h-3 w-3" />{" "}
+                        {new Date(receipt.createdAt).toLocaleDateString(
+                          "id-ID",
+                        )}
                       </span>
                     </div>
 
@@ -573,7 +653,11 @@ export default function BarangReturPage() {
                         className="flex items-center gap-1 text-[11px] font-semibold text-zinc-400 hover:text-zinc-200 cursor-pointer"
                       >
                         <span>Detail Items ({receipt.items.length})</span>
-                        {isExpanded ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+                        {isExpanded ? (
+                          <ChevronUp className="h-3.5 w-3.5" />
+                        ) : (
+                          <ChevronDown className="h-3.5 w-3.5" />
+                        )}
                       </button>
                     </div>
                   </div>
@@ -586,9 +670,12 @@ export default function BarangReturPage() {
                           className="flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-900/90 p-2.5 text-xs"
                         >
                           <div>
-                            <p className="font-bold text-zinc-200">{item.variant?.product?.name}</p>
+                            <p className="font-bold text-zinc-200">
+                              {item.variant?.product?.name}
+                            </p>
                             <p className="text-[10px] text-zinc-400">
-                              {item.variant?.color?.name} - {item.variant?.size?.name}
+                              {item.variant?.color?.name} -{" "}
+                              {item.variant?.size?.name}
                             </p>
                           </div>
                           <div className="text-right flex items-center gap-3">
@@ -617,7 +704,9 @@ export default function BarangReturPage() {
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-zinc-950/80 p-4 backdrop-blur-sm animate-in fade-in duration-150">
           <div className="w-full max-w-sm rounded-2xl border border-zinc-800 bg-zinc-900 p-4 shadow-2xl space-y-3 max-h-[85vh] flex flex-col">
             <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
-              <h3 className="text-xs font-bold text-zinc-100">Cari Varian Produk Retur</h3>
+              <h3 className="text-xs font-bold text-zinc-100">
+                Cari Varian Produk Retur
+              </h3>
               <button
                 onClick={() => setShowPicker(false)}
                 className="rounded-lg p-1 text-zinc-400 hover:bg-zinc-800 cursor-pointer"
@@ -659,8 +748,12 @@ export default function BarangReturPage() {
                       </p>
                     </div>
                     <div className="text-right">
-                      <span className="text-[9px] text-zinc-500 block">Stok Sedia</span>
-                      <span className="font-bold text-rose-400">{v.stock} pcs</span>
+                      <span className="text-[9px] text-zinc-500 block">
+                        Stok Sedia
+                      </span>
+                      <span className="font-bold text-rose-400">
+                        {v.stock} pcs
+                      </span>
                     </div>
                   </div>
                 ))

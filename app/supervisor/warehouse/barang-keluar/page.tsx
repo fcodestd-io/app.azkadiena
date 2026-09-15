@@ -28,6 +28,7 @@ import {
   User,
   QrCode,
   Camera,
+  ScanLine,
   History,
 } from "lucide-react";
 
@@ -53,9 +54,13 @@ export default function BarangKeluarPage() {
   const [tempItems, setTempItems] = useState<TempItem[]>([]);
 
   // Webcam Scanner State (Inline)
+  // isScanning sekarang berarti "kamera aktif/preview terbuka", BUKAN sedang
+  // auto-decode terus-menerus. Decode barcode hanya terjadi saat tombol
+  // "Tangkap & Scan" ditekan (lihat handleCaptureAndScan).
   const [showScanner, setShowScanner] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const codeReaderRef = useRef<BrowserMultiFormatReader | null>(null);
   const lastScannedTimeRef = useRef<number>(0);
 
@@ -168,14 +173,10 @@ export default function BarangKeluarPage() {
   };
 
   // ------------------------------------------------------------------
-  // WEBCAM SCANNER SAFE CLEANUP LOGIC
+  // WEBCAM SCANNER: BUKA PREVIEW KAMERA SAJA (TIDAK AUTO-DECODE)
   // ------------------------------------------------------------------
   const stopScanner = () => {
     try {
-      if (codeReaderRef.current) {
-        codeReaderRef.current = null;
-      }
-
       if (videoRef.current && videoRef.current.srcObject) {
         const stream = videoRef.current.srcObject as MediaStream;
         const tracks = stream.getTracks();
@@ -189,44 +190,81 @@ export default function BarangKeluarPage() {
     }
   };
 
+  // Hanya membuka stream kamera untuk preview. Tidak ada loop decode di sini
+  // sama sekali — barcode baru dibaca saat user menekan tombol scan.
   const startScanner = async () => {
     stopScanner();
-    setIsScanning(true);
 
     try {
-      const codeReader = new BrowserMultiFormatReader();
-      codeReaderRef.current = codeReader;
+      if (!codeReaderRef.current) {
+        codeReaderRef.current = new BrowserMultiFormatReader();
+      }
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "environment" },
+        audio: false,
+      });
 
       if (videoRef.current) {
-        await codeReader.decodeFromVideoDevice(
-          undefined,
-          videoRef.current,
-          (result) => {
-            if (result) {
-              const now = Date.now();
-              if (now - lastScannedTimeRef.current < 1500) {
-                return;
-              }
-              lastScannedTimeRef.current = now;
-
-              const scannedBarcode = result.getText();
-              const matchedVariant = variantOptions.find(
-                (v) => v.barcode === scannedBarcode || v.sku === scannedBarcode,
-              );
-
-              if (matchedVariant) {
-                addVariantToTempList(matchedVariant);
-              } else {
-                toast.error(`Barcode/SKU "${scannedBarcode}" tidak ditemukan.`);
-              }
-            }
-          },
-        );
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
       }
+
+      setIsScanning(true);
     } catch (err) {
-      console.error("Gagal memulai kamera:", err);
+      console.error("Gagal membuka kamera:", err);
       toast.error("Gagal membuka kamera. Pastikan izin kamera aktif.");
       setIsScanning(false);
+    }
+  };
+
+  // Dipanggil HANYA saat tombol "Tangkap & Scan" ditekan. Mengambil satu
+  // frame dari video yang sedang preview, lalu mencoba decode barcode dari
+  // frame tersebut satu kali (bukan terus-menerus).
+  const handleCaptureAndScan = () => {
+    if (!videoRef.current || !canvasRef.current || !codeReaderRef.current) {
+      return;
+    }
+
+    const now = Date.now();
+    if (now - lastScannedTimeRef.current < 700) {
+      return;
+    }
+    lastScannedTimeRef.current = now;
+
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    const width = video.videoWidth;
+    const height = video.videoHeight;
+
+    if (!width || !height) {
+      toast.warning("Kamera belum siap, coba lagi sebentar.");
+      return;
+    }
+
+    canvas.width = width;
+    canvas.height = height;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.drawImage(video, 0, 0, width, height);
+
+    try {
+      const result = codeReaderRef.current.decodeFromCanvas(canvas);
+      const scannedBarcode = result.getText();
+      const matchedVariant = variantOptions.find(
+        (v) => v.barcode === scannedBarcode || v.sku === scannedBarcode,
+      );
+
+      if (matchedVariant) {
+        addVariantToTempList(matchedVariant);
+      } else {
+        toast.error(`Barcode/SKU "${scannedBarcode}" tidak ditemukan.`);
+      }
+    } catch (err) {
+      toast.warning(
+        "Barcode tidak terdeteksi. Posisikan barcode di tengah bingkai lalu tekan tombol Scan lagi.",
+      );
     }
   };
 
@@ -363,18 +401,29 @@ export default function BarangKeluarPage() {
             {/* Video Viewfinder Persegi Panjang Horizontal */}
             <div className="relative overflow-hidden rounded-xl border-2 border-zinc-800 bg-zinc-900 h-44 flex items-center justify-center">
               <video ref={videoRef} className="h-full w-full object-cover" />
+              {/* Canvas tersembunyi, dipakai hanya untuk menangkap 1 frame saat tombol Scan ditekan */}
+              <canvas ref={canvasRef} className="hidden" />
 
               <div className="absolute inset-0 pointer-events-none flex items-center justify-center p-4">
-                <div className="w-full h-20 border-2 border-sky-400/80 rounded-lg relative bg-sky-500/5 shadow-[0_0_15px_rgba(56,189,248,0.2)]">
-                  {isScanning && (
-                    <div className="absolute inset-x-0 h-0.5 bg-sky-400 animate-pulse top-1/2 -translate-y-1/2 shadow-[0_0_8px_#38bdf8]" />
-                  )}
-                </div>
+                <div className="w-full h-20 border-2 border-sky-400/80 rounded-lg bg-sky-500/5 shadow-[0_0_15px_rgba(56,189,248,0.2)]" />
               </div>
+
+              {!isScanning && (
+                <div className="absolute inset-0 flex items-center justify-center bg-zinc-950/60">
+                  <span className="text-[11px] text-zinc-400">
+                    Kamera belum aktif
+                  </span>
+                </div>
+              )}
             </div>
 
+            <p className="text-[10px] text-zinc-500 text-center">
+              Posisikan barcode di dalam bingkai, lalu tekan tombol "Tangkap &
+              Scan" untuk membaca.
+            </p>
+
             {/* Control Tombol Scan */}
-            <div>
+            <div className="space-y-2">
               {!isScanning ? (
                 <button
                   type="button"
@@ -382,17 +431,27 @@ export default function BarangKeluarPage() {
                   className="w-full flex items-center justify-center gap-2 rounded-xl bg-sky-500 py-2 text-xs font-bold text-zinc-950 active:scale-95 cursor-pointer shadow-md shadow-sky-500/20"
                 >
                   <Camera className="h-3.5 w-3.5" />
-                  <span>Mulai Pemindaian Kamera</span>
+                  <span>Buka Kamera</span>
                 </button>
               ) : (
-                <button
-                  type="button"
-                  onClick={stopScanner}
-                  className="w-full flex items-center justify-center gap-2 rounded-xl border border-red-500/30 bg-red-500/10 py-2 text-xs font-bold text-red-400 hover:bg-red-500/20 active:scale-95 cursor-pointer"
-                >
-                  <X className="h-3.5 w-3.5" />
-                  <span>Hentikan Pemindaian</span>
-                </button>
+                <>
+                  <button
+                    type="button"
+                    onClick={handleCaptureAndScan}
+                    className="w-full flex items-center justify-center gap-2 rounded-xl bg-sky-500 py-2.5 text-xs font-bold text-zinc-950 active:scale-95 cursor-pointer shadow-md shadow-sky-500/20"
+                  >
+                    <ScanLine className="h-4 w-4" />
+                    <span>Tangkap &amp; Scan Barcode</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={stopScanner}
+                    className="w-full flex items-center justify-center gap-2 rounded-xl border border-red-500/30 bg-red-500/10 py-2 text-xs font-bold text-red-400 hover:bg-red-500/20 active:scale-95 cursor-pointer"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                    <span>Hentikan Pemindaian</span>
+                  </button>
+                </>
               )}
             </div>
           </div>

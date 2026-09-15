@@ -66,6 +66,16 @@ export async function getAttributesForProduct() {
   return { sizes: sizeList, colors: colorList };
 }
 
+// Action untuk tombol "Sync Data" di client: mengambil ulang data produk
+// terbaru langsung dari database (bypass cache Next.js), dipakai lewat
+// React `use()` + <Suspense> di client component.
+// Limit dinaikkan agar sinkronisasi mencakup seluruh katalog produk yang
+// biasanya ditampilkan; sesuaikan angkanya kalau katalog sudah sangat besar.
+export async function syncProductsAction() {
+  const { products: productList } = await getProducts(1, 500, "");
+  return productList;
+}
+
 // Action Tambah Produk Baru
 export async function createProductAction(
   prevState: ActionState,
